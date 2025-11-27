@@ -97,7 +97,7 @@
             max-width: 1000px;
             width: 100%;
             margin: 0 auto;
-            padding: 30px 20px;
+            padding: 30px 20px 120px 20px;
             overflow-y: auto;
             scroll-behavior: smooth;
             display: flex;
@@ -557,6 +557,12 @@
             
             // 初始化文件上传事件监听
             document.getElementById('fileInput').addEventListener('change', handleFileSelect);
+            
+            // 确保页面加载后滚动到底部
+            setTimeout(() => {
+                const container = document.getElementById('chatContainer');
+                container.scrollTop = container.scrollHeight;
+            }, 100);
         };
 
         // ==================== 主题切换 ====================
@@ -629,8 +635,10 @@
 
         // ==================== 流式请求 ====================
         async function sendStreamRequest(text) {
-            // 创建 AI 消息气泡（用于流式更新）
-            const aiMessageId = createAIBubble();
+            // 显示等待动画
+            const typingId = showTypingIndicator();
+            
+            let aiMessageId = null;
             let fullContent = '';
 
             abortController = new AbortController();
@@ -675,6 +683,11 @@
                             const parsed = JSON.parse(data);
                             const content = parsed.choices?.[0]?.delta?.content;
                             if (content) {
+                                // 收到第一个内容时，移除等待动画并创建AI消息气泡
+                                if (!aiMessageId) {
+                                    removeTypingIndicator(typingId);
+                                    aiMessageId = createAIBubble();
+                                }
                                 fullContent += content;
                                 updateAIBubble(aiMessageId, fullContent);
                             }
@@ -683,6 +696,11 @@
                         }
                     }
                 }
+            }
+
+            // 如果没有收到任何内容，移除等待动画
+            if (!aiMessageId) {
+                removeTypingIndicator(typingId);
             }
 
             // 保存到历史记录
@@ -882,10 +900,43 @@
         function updateAIBubble(messageId, content) {
             const bubble = document.getElementById(messageId + '-bubble');
             if (bubble) {
-                bubble.textContent = content;
+                // 解析内容，将图片URL转换为图片元素
+                bubble.innerHTML = parseContentWithImages(content);
                 const container = document.getElementById('chatContainer');
                 container.scrollTop = container.scrollHeight;
             }
+        }
+
+        // 解析内容中的图片URL并转换为HTML
+        function parseContentWithImages(content) {
+            // 匹配图片URL的正则表达式（支持常见图片格式）
+            const imageUrlRegex = /(https?:\/\/[^\s]+\.(?:png|jpg|jpeg|gif|webp|bmp|svg))/gi;
+            
+            // 将内容按行分割处理
+            const lines = content.split('\n');
+            const processedLines = lines.map(line => {
+                // 检查该行是否是纯图片URL
+                const trimmedLine = line.trim();
+                if (imageUrlRegex.test(trimmedLine) && trimmedLine.match(imageUrlRegex)?.[0] === trimmedLine) {
+                    // 重置正则表达式的lastIndex
+                    imageUrlRegex.lastIndex = 0;
+                    // 该行是纯图片URL，转换为图片元素
+                    return `<div class="ai-image-container"><img src="${escapeHtml(trimmedLine)}" alt="AI生成的图片" style="max-width: 300px; max-height: 300px; border-radius: 8px; cursor: pointer; margin: 8px 0;" onclick="window.open('${escapeHtml(trimmedLine)}', '_blank')" onerror="this.style.display='none'; this.nextSibling.style.display='inline';"><span style="display:none;">${escapeHtml(trimmedLine)}</span></div>`;
+                }
+                // 重置正则表达式的lastIndex
+                imageUrlRegex.lastIndex = 0;
+                // 普通文本行，转义HTML
+                return escapeHtml(line);
+            });
+            
+            return processedLines.join('<br>');
+        }
+
+        // HTML转义函数
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
         }
 
         function showTypingIndicator() {
@@ -1028,7 +1079,12 @@
                 
                 const bubbleDiv = document.createElement('div');
                 bubbleDiv.className = 'bubble';
-                bubbleDiv.textContent = msg.content;
+                // AI消息需要解析图片URL
+                if (msg.role === 'ai') {
+                    bubbleDiv.innerHTML = parseContentWithImages(msg.content);
+                } else {
+                    bubbleDiv.textContent = msg.content;
+                }
                 
                 const timeDiv = document.createElement('div');
                 timeDiv.className = 'timestamp';
