@@ -969,7 +969,7 @@ def health_check():
     return jsonify({"status": "ok", "timestamp": datetime.now().isoformat()})
 
 
-@app.route('/v1/status', methods=['GET'])
+@app.route('/api/status', methods=['GET'])
 def system_status():
     """获取系统状态"""
     total, available = account_manager.get_account_count()
@@ -997,6 +997,10 @@ def index():
     """返回管理页面"""
     return send_from_directory('.', 'index.html')
 
+@app.route('/chat_history.html')
+def chat_history():
+    """返回聊天记录页面"""
+    return send_from_directory('.', 'chat_history.html')
 
 @app.route('/api/accounts', methods=['GET'])
 def get_accounts():
