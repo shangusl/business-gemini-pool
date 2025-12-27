@@ -2115,12 +2115,15 @@ def chat_completions():
                                             
                                             if is_base64_output_mode():
                                                 b64_data = base64.b64encode(image_data).decode("utf-8")
-                                                image_url = f"data:{mime};base64,{b64_data}"
+                                                # 使用 Markdown 图片语法，与非流式模式一致
+                                                image_content = f"![image](data:{mime};base64,{b64_data})"
                                             else:
                                                 filename = save_image_to_cache(image_data, mime, fname)
-                                                image_url = f"{request.host_url}image/{filename}"
+                                                base_url = get_image_base_url(request.host_url)
+                                                # 使用 Markdown 图片语法，与非流式模式一致
+                                                image_content = f"![image]({base_url}image/{filename})"
                                             
-                                            # 发送图片URL作为一个chunk
+                                            # 发送图片作为一个chunk
                                             img_chunk = {
                                                 "id": chunk_id,
                                                 "object": "chat.completion.chunk",
@@ -2128,7 +2131,7 @@ def chat_completions():
                                                 "model": "gemini-enterprise",
                                                 "choices": [{
                                                     "index": 0,
-                                                    "delta": {"content": f"\n{image_url}"},
+                                                    "delta": {"content": f"\n\n{image_content}"},
                                                     "finish_reason": None
                                                 }]
                                             }
