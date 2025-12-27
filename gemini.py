@@ -131,6 +131,11 @@ class NoAvailableAccount(AccountError):
     """无可用账号异常"""
 
 
+class UnsupportedFileTypeError(Exception):
+    """不支持的文件类型异常，不需要重试"""
+    pass
+
+
 def get_admin_secret_key() -> str:
     """获取/初始化后台密钥"""
     global ADMIN_SECRET_KEY
@@ -819,7 +824,28 @@ def upload_file_to_gemini(jwt: str, session_name: str, team_id: str,
     
     Returns:
         str: Gemini 返回的 fileId
+    
+    Raises:
+        UnsupportedFileTypeError: 不支持的文件类型，不需要重试
     """
+    # Gemini 支持的图片类型白名单（不包括 GIF）
+    SUPPORTED_IMAGE_TYPES = {
+        "image/png", "image/jpeg", "image/jpg", "image/webp",
+        "image/heic", "image/heif"
+    }
+    # 其他支持的文件类型
+    SUPPORTED_OTHER_TYPES = {
+        "application/pdf", "text/plain", "text/csv", "text/html",
+        "application/json", "application/xml"
+    }
+    
+    # 检查是否是支持的类型
+    if mime_type.startswith("image/"):
+        if mime_type not in SUPPORTED_IMAGE_TYPES:
+            raise UnsupportedFileTypeError(f"不支持的图片格式: {mime_type}。支持的格式: PNG, JPEG, WebP, HEIC")
+    elif mime_type not in SUPPORTED_OTHER_TYPES and not mime_type.startswith("text/"):
+        print(f"[警告] MIME类型 {mime_type} 可能不被支持，尝试上传...")
+    
     start_time = time.time()
     print(f"[DEBUG][upload_file_to_gemini] 开始上传文件: {filename}, MIME类型: {mime_type}, 文件大小: {len(file_content)} bytes")
     
@@ -1332,6 +1358,9 @@ def upload_inline_image_to_gemini(jwt: str, session_name: str, team_id: str,
     except AccountError:
         # 让账号相关错误向上抛出，以便触发冷却
         raise
+    except UnsupportedFileTypeError:
+        # 不支持的文件类型，向上抛出让调用方处理
+        raise
     except Exception:
         return None
 
@@ -1759,6 +1788,10 @@ def upload_file():
                 last_error = e
                 print(f"[文件上传] 无可用账号: {e}")
                 break
+            except UnsupportedFileTypeError as e:
+                # 不支持的文件类型，直接返回错误，不重试
+                print(f"[文件上传] 不支持的文件类型: {e}")
+                return jsonify({"error": {"message": str(e), "type": "invalid_request_error"}}), 400
             except Exception as e:
                 last_error = e
                 print(f"[文件上传] 第{retry_idx+1}次尝试失败: {type(e).__name__}: {e}")
@@ -1995,6 +2028,9 @@ def chat_completions():
                 except (AccountRateLimitError, AccountAuthError, AccountRequestError) as e:
                     last_error = e
                     account_manager.mark_account_cooldown(account_idx, str(e), account_manager.generic_error_cooldown)
+                except UnsupportedFileTypeError as e:
+                    # 不支持的文件类型，直接返回错误，不重试
+                    return jsonify({"error": {"message": str(e), "type": "invalid_request_error"}}), 400
                 except Exception as e:
                     last_error = e
             else:
@@ -2045,6 +2081,9 @@ def chat_completions():
                         print(f"[聊天流式] 第{retry_idx+1}次尝试失败(请求异常): {e}")
                         account_idx = None
                         continue
+                    except UnsupportedFileTypeError as e:
+                        # 不支持的文件类型，直接返回错误，不重试
+                        return jsonify({"error": {"message": str(e), "type": "invalid_request_error"}}), 400
                     except Exception as e:
                         last_error = e
                         print(f"[聊天流式] 第{retry_idx+1}次尝试失败: {type(e).__name__}: {e}")
@@ -2225,6 +2264,9 @@ def chat_completions():
             except (AccountRateLimitError, AccountAuthError, AccountRequestError) as e:
                 last_error = e
                 account_manager.mark_account_cooldown(account_idx, str(e), account_manager.generic_error_cooldown)
+            except UnsupportedFileTypeError as e:
+                # 不支持的文件类型，直接返回错误，不重试
+                return jsonify({"error": {"message": str(e), "type": "invalid_request_error"}}), 400
             except Exception as e:
                 last_error = e
         else:
@@ -2280,6 +2322,9 @@ def chat_completions():
                         account_manager.mark_account_cooldown(account_idx, str(e), account_manager.generic_error_cooldown)
                     print(f"[聊天] 第{retry_idx+1}次尝试失败(请求异常): {e}")
                     continue
+                except UnsupportedFileTypeError as e:
+                    # 不支持的文件类型，直接返回错误，不重试
+                    return jsonify({"error": {"message": str(e), "type": "invalid_request_error"}}), 400
                 except Exception as e:
                     last_error = e
                     print(f"[聊天] 第{retry_idx+1}次尝试失败: {type(e).__name__}: {e}")
