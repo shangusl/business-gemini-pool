@@ -277,7 +277,7 @@ class AccountManager:
         self.config = None
         self.accounts = []  # 账号列表
         self.current_index = 0  # 当前轮训索引
-        self.account_states = {}  # 账号状态: {index: {jwt, jwt_time, session, available, cooldown_until, cooldown_reason}}
+        self.account_states = {}  # 账号状态: {index: {jwt, jwt_time, session, available, cooldown_until, cooldown_reason, model_cooldowns: {model_id: {until, reason}}}}
         self.lock = threading.Lock()
         self.auth_error_cooldown = AUTH_ERROR_COOLDOWN_SECONDS
         self.rate_limit_cooldown = RATE_LIMIT_COOLDOWN_SECONDS
@@ -307,7 +307,8 @@ class AccountManager:
                         "session": None,
                         "available": available,
                         "cooldown_until": acc.get("cooldown_until"),
-                        "cooldown_reason": acc.get("unavailable_reason") or acc.get("cooldown_reason") or ""
+                        "cooldown_reason": acc.get("unavailable_reason") or acc.get("cooldown_reason") or "",
+                        "model_cooldowns": {}  # 按模型冷却: {model_id: {until, reason}}
                     }
         return self.config
     
@@ -359,13 +360,69 @@ class AccountManager:
                 print(f"[!] 账号 {index} 进入冷却 {cooldown_seconds} 秒: {reason}")
 
     def _is_in_cooldown(self, index: int, now_ts: Optional[float] = None) -> bool:
-        """检查账号是否处于冷却期"""
+        """检查账号是否处于冷却期（全局冷却）"""
         now_ts = now_ts or time.time()
         state = self.account_states.get(index, {})
         cooldown_until = state.get("cooldown_until")
         if not cooldown_until:
             return False
         return now_ts < cooldown_until
+
+    def mark_account_model_cooldown(self, index: int, model_id: str, reason: str = "", cooldown_seconds: Optional[int] = None):
+        """针对特定模型设置账号冷却，其他模型不受影响"""
+        if cooldown_seconds is None:
+            cooldown_seconds = self.rate_limit_cooldown
+
+        with self.lock:
+            if 0 <= index < len(self.accounts):
+                now_ts = time.time()
+                new_until = now_ts + cooldown_seconds
+                state = self.account_states.setdefault(index, {})
+                model_cooldowns = state.setdefault("model_cooldowns", {})
+                
+                current_cd = model_cooldowns.get(model_id, {})
+                current_until = current_cd.get("until") or 0
+                # 如果已有更长的冷却，则不重复更新
+                if current_until > now_ts and current_until >= new_until:
+                    return
+
+                until = max(new_until, current_until)
+                model_cooldowns[model_id] = {"until": until, "reason": reason}
+                print(f"[!] 账号 {index} 模型 {model_id} 进入冷却 {cooldown_seconds} 秒: {reason}")
+
+    def _is_model_in_cooldown(self, index: int, model_id: str, now_ts: Optional[float] = None) -> bool:
+        """检查账号的特定模型是否处于冷却期"""
+        now_ts = now_ts or time.time()
+        state = self.account_states.get(index, {})
+        model_cooldowns = state.get("model_cooldowns", {})
+        model_cd = model_cooldowns.get(model_id, {})
+        cooldown_until = model_cd.get("until")
+        if not cooldown_until:
+            return False
+        return now_ts < cooldown_until
+
+    def get_next_model_cooldown_info(self, model_id: str) -> Optional[dict]:
+        """获取指定模型最近即将结束冷却的账号信息"""
+        now_ts = time.time()
+        candidates = []
+        for idx, state in self.account_states.items():
+            if not state.get("available", True):
+                continue
+            # 检查全局冷却
+            if self._is_in_cooldown(idx, now_ts):
+                global_until = state.get("cooldown_until")
+                candidates.append((global_until, idx, "全局冷却"))
+                continue
+            # 检查模型冷却
+            model_cooldowns = state.get("model_cooldowns", {})
+            model_cd = model_cooldowns.get(model_id, {})
+            model_until = model_cd.get("until")
+            if model_until and model_until > now_ts:
+                candidates.append((model_until, idx, model_cd.get("reason", "")))
+        if not candidates:
+            return None
+        cooldown_until, idx, reason = min(candidates, key=lambda x: x[0])
+        return {"index": idx, "cooldown_until": cooldown_until, "reason": reason}
 
     def get_next_cooldown_info(self) -> Optional[dict]:
         """获取最近即将结束冷却的账号信息"""
@@ -387,8 +444,8 @@ class AccountManager:
             return False
         return not self._is_in_cooldown(index)
     
-    def get_available_accounts(self):
-        """获取可用账号列表"""
+    def get_available_accounts(self, model_id: str = None):
+        """获取可用账号列表，支持按模型过滤"""
         now_ts = time.time()
         available_accounts = []
         for i, acc in enumerate(self.accounts):
@@ -397,18 +454,26 @@ class AccountManager:
                 continue
             if self._is_in_cooldown(i, now_ts):
                 continue
+            # 如果指定了模型，检查该模型是否在冷却
+            if model_id and self._is_model_in_cooldown(i, model_id, now_ts):
+                continue
             available_accounts.append((i, acc))
         return available_accounts
     
-    def get_next_account(self):
-        """轮训获取下一个可用账号"""
+    def get_next_account(self, model_id: str = None):
+        """轮训获取下一个可用账号，支持按模型过滤"""
         with self.lock:
-            available = self.get_available_accounts()
+            available = self.get_available_accounts(model_id)
             if not available:
-                cooldown_info = self.get_next_cooldown_info()
+                # 先检查模型级别的冷却
+                if model_id:
+                    cooldown_info = self.get_next_model_cooldown_info(model_id)
+                else:
+                    cooldown_info = self.get_next_cooldown_info()
                 if cooldown_info:
                     remaining = int(max(0, cooldown_info["cooldown_until"] - time.time()))
-                    raise NoAvailableAccount(f"没有可用的账号（最近冷却账号 {cooldown_info['index']}，约 {remaining} 秒后可重试）")
+                    model_hint = f" (模型: {model_id})" if model_id else ""
+                    raise NoAvailableAccount(f"没有可用的账号{model_hint}（最近冷却账号 {cooldown_info['index']}，约 {remaining} 秒后可重试）")
                 raise NoAvailableAccount("没有可用的账号")
             
             # 轮训选择
@@ -416,6 +481,7 @@ class AccountManager:
             idx, account = available[self.current_index]
             self.current_index = (self.current_index + 1) % len(available)
             return idx, account
+
     
     def get_account_count(self):
         """获取账号数量统计"""
@@ -1595,6 +1661,8 @@ def chat_completions():
         messages = data.get('messages', [])
         prompts = data.get('prompts', [])  # 支持替代格式
         stream = data.get('stream', False)
+        requested_model = data.get('model', 'gemini-enterprise')  # 提取请求的模型，用于按模型冷却
+
 
         # 提取用户消息、图片和文件ID
         user_message = ""
@@ -1738,14 +1806,14 @@ def chat_completions():
             except Exception as e:
                 last_error = e
         else:
-            # 轮训获取账号
-            available_accounts = account_manager.get_available_accounts()
+            # 轮训获取账号（按模型过滤）
+            available_accounts = account_manager.get_available_accounts(requested_model)
             if not available_accounts:
-                next_cd = account_manager.get_next_cooldown_info()
+                next_cd = account_manager.get_next_model_cooldown_info(requested_model)
                 wait_msg = ""
                 if next_cd:
-                    wait_msg = f"（最近冷却账号 {next_cd['index']}，约 {int(next_cd['cooldown_until']-time.time())} 秒后可重试）"
-                return jsonify({"error": f"没有可用的账号{wait_msg}"}), 429
+                    wait_msg = f"（模型 {requested_model} 最近冷却账号 {next_cd['index']}，约 {int(next_cd['cooldown_until']-time.time())} 秒后可重试）"
+                return jsonify({"error": f"模型 {requested_model} 没有可用的账号{wait_msg}"}), 429
 
             max_retries = len(available_accounts)
             last_error = None
@@ -1754,7 +1822,7 @@ def chat_completions():
             for retry_idx in range(max_retries):
                 account_idx = None
                 try:
-                    account_idx, account = account_manager.get_next_account()
+                    account_idx, account = account_manager.get_next_account(requested_model)
                     # 对话隔离：每次请求创建新的 session，不复用缓存的 session
                     jwt = ensure_jwt_for_account(account_idx, account)
                     proxy = get_proxy()
@@ -1774,8 +1842,9 @@ def chat_completions():
                     if account_idx is not None:
                         pt_wait = seconds_until_next_pt_midnight()
                         cooldown_seconds = max(account_manager.rate_limit_cooldown, pt_wait)
-                        account_manager.mark_account_cooldown(account_idx, str(e), cooldown_seconds)
-                    print(f"[聊天] 第{retry_idx+1}次尝试失败(限额): {e}")
+                        # 按模型冷却，其他模型仍可使用该账号
+                        account_manager.mark_account_model_cooldown(account_idx, requested_model, str(e), cooldown_seconds)
+                    print(f"[聊天] 第{retry_idx+1}次尝试失败(限额): 模型={requested_model}, {e}")
                     continue
                 except AccountAuthError as e:
                     last_error = e
@@ -2025,6 +2094,20 @@ def get_accounts():
         state = account_manager.account_states.get(i, {})
         cooldown_until = state.get("cooldown_until")
         cooldown_active = bool(cooldown_until and cooldown_until > now_ts)
+        
+        # 处理按模型冷却信息
+        model_cooldowns_raw = state.get("model_cooldowns", {})
+        model_cooldowns_active = {}
+        for model_id, cd_info in model_cooldowns_raw.items():
+            cd_until = cd_info.get("until")
+            if cd_until and cd_until > now_ts:
+                model_cooldowns_active[model_id] = {
+                    "until": cd_until,
+                    "reason": cd_info.get("reason", ""),
+                    "remaining": int(cd_until - now_ts)
+                }
+        
+        # 如果有模型冷却但没有全局冷却，账号仍然可用（对其他模型）
         effective_available = state.get("available", True) and not cooldown_active
 
         # 返回完整值用于编辑，前端显示时再截断
@@ -2039,9 +2122,11 @@ def get_accounts():
             "unavailable_reason": acc.get("unavailable_reason", ""),
             "cooldown_until": cooldown_until if cooldown_active else None,
             "cooldown_reason": state.get("cooldown_reason", ""),
+            "model_cooldowns": model_cooldowns_active,  # 按模型冷却信息
             "has_jwt": state.get("jwt") is not None
         })
     return jsonify({"accounts": accounts_data})
+
 
 
 @app.route('/api/accounts', methods=['POST'])
