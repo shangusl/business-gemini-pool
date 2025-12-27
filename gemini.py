@@ -1029,11 +1029,22 @@ def extract_images_from_openai_content(content: Any) -> tuple[str, List[Dict]]:
                     "url": url
                 })
         
-        # 支持直接的 image 类型（带 data 字段）
-        elif item_type == "image" and item.get("data"):
-            parsed = parse_base64_data_url(item.get("data"))
-            if parsed:
-                images.append(parsed)
+        # 支持直接的 image 类型
+        elif item_type == "image":
+            # 格式1: data 字段包含完整的 data URL (data:image/png;base64,...)
+            if item.get("data"):
+                parsed = parse_base64_data_url(item.get("data"))
+                if parsed:
+                    images.append(parsed)
+            # 格式2: image 字段包含纯 base64 字符串，mediaType 字段包含 MIME 类型
+            elif item.get("image"):
+                base64_data = item.get("image")
+                mime_type = item.get("mediaType", "image/png")
+                images.append({
+                    "type": "base64",
+                    "mime_type": mime_type,
+                    "data": base64_data
+                })
     
     return "\n".join(text_parts), images
 
